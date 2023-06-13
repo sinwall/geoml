@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.spatial import distance_matrix
+from numba import jit, prange
 
 class Embedder():
     def __init__(self, dim=2, lag=1, reduce=1, dim_raw=None, channel_last=False):
@@ -49,14 +50,48 @@ class Weighting():
         return w.reshape(-1, 1)
 
 
+@jit(nopython=True, parallel=True)
+def calculate_weighting_vectors(pts_lst):
+    list_size = pts_lst.shape[0]
+    result = np.empty(pts_lst.shape[:-1])
+    n_pts = result.shape[-1]
+    dim = pts_lst.shape[-1]
+    for i in prange(list_size):
+        pts = pts_lst[i]
+        # pts_diff = np.empty((n_pts, n_pts, dim))
+        # for j in prange(n_pts):
+        #     pts_diff[j] = pts
+        # for k in prange(n_pts):
+        #     pts_diff[:, k] -= pts
+        pts_diff = np.zeros((n_pts, n_pts, dim))
+        for j in prange(n_pts):
+            pts_diff[j] += pts
+            pts_diff[:, j] -= pts
+        dist_mat = np.sqrt(np.sum(np.square(pts_diff), axis=-1))
+        A = np.exp(-dist_mat)
+        b = np.ones(n_pts)
+        w = np.linalg.lstsq(A, b, rcond=-1)[0]
+        result[i] = w
+    return result
+
+
 class SineFilter():
     def __init__(self, dim=2, n_filters=32, scale=None, random_state=None):
         if scale is None:
-            scale = np.sqrt(dim)
+            scale = 1
         rng = np.random.default_rng(random_state)
         self.wave_numbers = 2*rng.random((dim, n_filters))-1
-        self.wave_numbers *= scale * rng.random((1, n_filters)) / np.linalg.norm(self.wave_numbers, axis=1, keepdims=True)
+        self.wave_numbers *= scale * rng.random((1, n_filters)) / np.linalg.norm(self.wave_numbers, axis=0, keepdims=True)
         self.random_state = random_state
 
-    def apply(self, pts, weights):
-        return np.sum(np.sin(pts @ self.wave_numbers)*weights, axis=-2)
+    def apply(self, pts, weights, batch_size=None):
+        if batch_size is None:
+            batch_size = pts.shape[0]
+        result = np.empty((pts.shape[0], self.wave_numbers.shape[1]))
+        for i_start in range(0, result.shape[0], batch_size):
+            i_end = i_start + batch_size
+            pts_batch = pts[i_start:i_end]
+            weights_batch = weights[i_start:i_end]
+            i_end = i_start + batch_size
+            result[i_start:i_end] = np.sum(np.sin(pts_batch @ self.wave_numbers)*weights_batch, axis=-2)
+        return result
