@@ -1,0 +1,156 @@
+\documentclass{article}
+\linespread{1.3}
+\usepackage{amsmath,amssymb,amsthm}
+
+\newcommand{\R}{\mathbb{R}}
+
+\newtheorem{prop}{Proposition}
+\newtheorem{lem}{Lemma}
+
+\title{Stable feature extraction from periodic time series by weighting vectors}
+\author{Byungchang So}
+
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+
+Among a huge number of types of time series data in practice, many of them are (quasi-)periodic, that is, consists of similar patterns. 
+For example, data collected from human or animals like ECG(electrocardiogram), gait pressure or IoT sensor data from equipments repeating the same process. 
+These kinds of data are analyzed to diagnose cardial disorder or gait disease or malfunction of machines.
+
+Usually, such analysis are done by classical time series analysis or machine learning, deep learning. 
+
+It is quite reasonable that many models requires periodic information to be extracted ahead, or otherwise becomes complicated like deep neural networks. 
+In case of ECG, many segmentation algorithm is suggested (\cite{Pan1985}) to indicate structures like P-, QRS- and T-waves. 
+Then extracted features are fed into various models. \cite{Liu2022}
+
+Such time series analysis paradigm has, however, shortcomings that such preprocessing may propagate error forth, and achieving high performance may be domain-dependent and it is hard to unify analysis framework.
+
+This article suggests a vectorization method for periodic time series, which overcome the weakpoints. 
+
+After reviewing literatures in Section 2, vectorization method will be introduced in Section 3, where detailed proof left on appendix. 
+In Section 4, experiments on artificial and practial dataset is presented. 
+Practical datasets contains public datasets like MIT-BIH \cite{MIT-BIH}, gait dataset \cite{gait} from Physionet \cite{Physionet}, etc.
+
+
+\section{Related studies}
+
+\subsection{Time series vectorization}
+
+\subsection{analysis of (quasi-periodic) time series}
+Deep learning approach is widely accepted. 
+
+Besides, a branch of topological data analysis(TDA) uses phase-space embedding to transform time series into geometrical object, and then extracts persistent homology-theoritical features such as Betti number, Euler characteristic etc. 
+
+\subsection{magnitude and weighting}
+
+The \emph{magnitude} of a finite metric space describes its `effective number of points.' \cite{Leinster2013}
+Inside the context \emph{weighting} is vector of `effective number' of each point, which sum up to magnitude. 
+In fact, it is defined in a far more general and mathematically abstract setting.
+Through researches, it is proved that magnitude contains useful information of given metric space.
+
+Meanwhile, the paper \cite{Bunch2020} introduces an application of those notions to data analysis. 
+In this research, weighting (rather than magnitude itself) is used to rougly detect the position of each point of a point cloud. 
+
+\section{Embedding method}
+Throughout this paper, $(\mathbf{x}_t)$ denotes (possibly multivariate) time series data. 
+Phase space embedding $\varphi$ maps time series data into point cloud in $\R^N$. 
+Let us write the image as $\{P_{n}\}$.
+If $(w_n)$ is the weighting vector of $\{P_n\}$, then with any continuous function $f:\R^N \rightarrow \R^m$ we can define the sum $\sum_n w_n f(P_n)$. 
+Let us denote the entire pipeline as $\Psi_{\varphi, f}$.
+
+\begin{prop}[stability]
+Let $(\mathbf{x}_t^{(i)})\ (i=1,2)$ be a pair of discrete time series sampled with common frequency from a periodic continuously differentiable time series, each of which spans at least one period. 
+Then we have
+	\begin{equation*}
+	|\Psi_{\varphi, f}((\mathbf{x}_t^{(1)})) - \Psi_{\varphi, f}((\mathbf{x}_t^{(2)})) | < \epsilon.
+	\end{equation*}
+\end{prop}
+
+\begin{proof}
+
+\emph{Step 1. Continuity of $\varphi$. }
+If original continuous time series is Lipschitz with coefficient $M$, then difference of $\varphi$ is at most $\sqrt{N}M/f$.
+Therefore, Hausdorff metric between two is $\leq \sqrt{N}M/f$.
+
+\emph{Step 2. }
+
+
+\end{proof}
+
+
+\begin{lem}[Weak continuity]
+Let $P=\{p_i\}$ be a point cloud in $\R^N$ and $w_P$ its weighting vector. 
+Let $\mu_P = \sum_p w_p \delta_p$ be associated measure. 
+If $Q=\{q_j\}$ converges to $P$ w.r.t. Hausdorff metric, then $\mu_Q$ converges weakly to $\mu_P$.
+\end{lem}
+
+\begin{proof}
+We fix $f \in C_c{(\R^N)}$ and prove that $\int f d\mu_Q$ converges to $\int f d\mu_P$.
+\end{proof}
+
+Here is rough description about how such stability is achieved. 
+When sampling is changed, number of points and the points themselves are changed as well, but the points are not far from original ones. 
+However, such closeness correspondence may not be one-to-one, and so naive application of filter function is not stable. 
+Here, it is necessary to regard multiple points close to single point having divided ``importance'' of that of single point. 
+The notion of weighting vector \cite{Leinster2013} has this property.
+
+
+Step 2: weak continuity of weighting vector. 
+Let $X=\{x_i\}$ and $Y=\{y_j\}$ be two point clouds(finite subsets) such that $d_H(X,Y) < \delta$. 
+By definition of Hausdorff distance, for each $x_i$ we can choose $y_{\alpha(i)}$ such that $d(x_i, y_{\alpha(i)}) < \delta$, and for each $y_j$ $x_{\beta(j)}$. 
+Let $A_{X \rightarrow Y}$ be $|X|\times|Y|$ matrix $\delta_{\alpha(i),j}$ and $A_{Y \rightarrow X}$ be $|Y|\times|X|$ matrix $\delta_{\beta{i},j}$.
+Then we have each entry of $\zeta_X A_{X \rightarrow Y} - A_{Y \rightarrow X}^T \zeta_Y$ controlable. 
+Then each entry of $A_{X \rightarrow Y} {\zeta_Y}^{-1} - {\zeta_X}^{-1} A_{Y \rightarrow X}^T$ controllable $\|{\zeta_X}^{-1}\| \cdot \|{\zeta_Y}^{-1}\|$.
+Then $A_{X \rightarrow Y} w_Y - w_X$ controllable. 
+Likewise, $A_{Y \rightarrow X} w_X - w_Y$ is controllable as well.
+
+
+
+Such vectorization has the following properties.
+
+a. leeway in interval length
+
+b. leeway in sampling freq
+
+c. leeway in interval position
+
+\section{Experiments}
+The leeways observed in previous section are exploited to do the following.
+
+a. role of weighting
+
+b. 
+
+Extracted features from time series are applied as follows.
+
+a. additional features in machine learning [wisdm][???][???] (mitbih, gaitndd)
+
+a1. added to deep neural network
+
+a2. added to GBDT model
+
+b. how stable this is? This even separates individuals.
+
+c. option: variable length.
+\cite{wisdm} \cite{wrist.ppg}
+
+\section{Discussion}
+Turn out to be useful for personalized diagnosis.
+
+Here are some limitations.
+
+1. Computational complexity. Calculation of weighting vector includes solving linear equation.
+
+2. Choice of parameters.
+
+3. Vulnerable to outliers.
+
+\section{Conclusion}
+
+\bibliographystyle{plain}
+\bibliography{refs}
+
+\end{document}
