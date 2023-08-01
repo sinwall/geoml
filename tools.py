@@ -51,13 +51,13 @@ class Weighting():
 
 
 @jit(nopython=True, parallel=True)
-def calculate_weighting_vectors(pts_lst):
-    list_size = pts_lst.shape[0]
-    result = np.empty(pts_lst.shape[:-1])
+def _calculate_weighting_vectors(pts_ary):
+    list_size = pts_ary.shape[0]
+    result = np.empty(pts_ary.shape[:-1])
     n_pts = result.shape[-1]
-    dim = pts_lst.shape[-1]
+    dim = pts_ary.shape[-1]
     for i in prange(list_size):
-        pts = pts_lst[i]
+        pts = pts_ary[i]
         # pts_diff = np.empty((n_pts, n_pts, dim))
         # for j in prange(n_pts):
         #     pts_diff[j] = pts
@@ -74,24 +74,41 @@ def calculate_weighting_vectors(pts_lst):
         result[i] = w
     return result
 
+def calculate_weighting_vectors(pts_lst, scale=1.):
+    if isinstance(pts_lst, np.ndarray):
+        shape = pts_lst.shape
+        pts_lst = pts_lst.reshape((-1, ) + shape[-2:])
+        result = _calculate_weighting_vectors(pts_lst/scale).reshape(shape[:-1] + (1, ))
+    elif isinstance(pts_lst, list):
+        result = [_calculate_weighting_vectors(pts/scale) for pts in pts_lst]
+    else:
+        raise ValueError
+    return result
+
 
 class SineFilter():
-    def __init__(self, dim=2, n_filters=32, scale=None, random_state=None):
-        if scale is None:
-            scale = 1
+    def __init__(self, dim, n_filters, scale=1., random_state=None):
         rng = np.random.default_rng(random_state)
-        self.wave_numbers = 2*rng.random((dim, n_filters))-1
-        self.wave_numbers *= scale * rng.random((1, n_filters)) / np.linalg.norm(self.wave_numbers, axis=0, keepdims=True)
+        self._wave_numbers = (2*rng.random((dim, n_filters))-1)
+        self._wave_numbers *= (1/scale)*rng.random((1, n_filters)) / np.linalg.norm(self._wave_numbers, axis=0, keepdims=True)
         self.random_state = random_state
 
     def apply(self, pts, weights, batch_size=None):
         if batch_size is None:
             batch_size = pts.shape[0]
-        result = np.empty((pts.shape[0], self.wave_numbers.shape[1]))
+        if pts.ndim > weights.ndim:
+            weights = weights[..., np.newaxis]
+        result = np.empty((pts.shape[0], self._wave_numbers.shape[1]))
         for i_start in range(0, result.shape[0], batch_size):
             i_end = i_start + batch_size
             pts_batch = pts[i_start:i_end]
             weights_batch = weights[i_start:i_end]
-            i_end = i_start + batch_size
-            result[i_start:i_end] = np.sum(np.sin(pts_batch @ self.wave_numbers)*weights_batch, axis=-2)
+            result[i_start:i_end] = np.sum(np.sin(pts_batch @ self._wave_numbers)*weights_batch, axis=-2)
         return result
+
+
+def generate_loocv_masks(seg_indivs):
+    for indiv in np.unique(seg_indivs):
+        mask_train = seg_indivs != indiv
+        mask_test = ~mask_train
+        yield mask_train, mask_test

@@ -20,6 +20,7 @@ from gaitndd.loader import load_data
 from tools import Embedder, SineFilter, calculate_weighting_vectors
 
 
+
 def get_model(n_classes, ts_shape=(300, 2), ts_only=True, xw_size=(128, )):
     l2_coef = 1e-2
     inputs_ts = keras.Input(ts_shape)
@@ -104,73 +105,83 @@ def get_model(n_classes, ts_shape=(300, 2), ts_only=True, xw_size=(128, )):
 
 
 def main():
+    today = '20230801'
     seg_len = 600
     ol_rate = 0.5
+    lag = 30
+    reduce = 0
+    dim_raw = 2
+    w_scale = 1e-1
+    f_scale = 1e-2
+    n_filters = 128
 
     segs, seg_labels, seg_indivs, mask_non_outlier, tabular_data, features_ts = load_data(seg_len=seg_len, ol_rate=ol_rate)
     
-
-    embedder = Embedder(lag=24, reduce=0, dim_raw=2, channel_last=True)
+    embedder = Embedder(lag=lag, reduce=reduce, dim_raw=dim_raw, channel_last=True)
     x = embedder.transform(segs)
-    w_filename = './output/w_gaitndd_20230721.npy'
-    if not os.path.isdir('./output'):
-        os.mkdir('./output')
+    output_path = f'./output/{today}'
+    w_filename = f'{output_path}/w_gaitndd.npy'
+    if not os.path.isdir(output_path):
+        os.mkdir(output_path)
     if os.path.isfile(w_filename):
         w = np.load(w_filename)
     else:
-        w = calculate_weighting_vectors(10*x)
+        w = calculate_weighting_vectors(x, w_scale)
         np.save(w_filename, w)
 
-    file_log = open('./output/log_20230719.csv', 'w')
-    file_log.write('random_state,ts_only_true,ts_only_false\n')
+    file_log = open(f'{output_path}/log_gaitndd.csv', 'w')
+    file_log.write('vs,random_state,ts_only_true,ts_only_false\n')
 
     for random_state in range(42, 42+100):
-        sine_filter = SineFilter(dim=x.shape[-1], n_filters=128, scale=1e1, random_state=random_state)
+        sine_filter = SineFilter(dim=x.shape[-1], n_filters=n_filters, scale=f_scale, random_state=random_state)
         sine_0d = sine_filter.apply(x, w, batch_size=256)
 
         keras.backend.clear_session()
         tf.keras.utils.set_random_seed(random_state)
         tf.config.experimental.enable_op_determinism()
 
+        for subcls in [
+            ['als', 'control'], ['control', 'hunt'], ['control', 'park']
+        ]:
         # subcls = ['als', 'control']
         # subcls = ['control', 'hunt']
-        subcls = ['control', 'park']
-        mask_subcls = np.isin(seg_labels, subcls)
+        # subcls = ['control', 'park']
+            mask_subcls = np.isin(seg_labels, subcls)
 
-        X = segs[:, ::4]
-        y_true = seg_labels.copy()
-        # y_true = seg_indivs.copy()
-        y_pred = y_true.copy()
-        y_pred_another = y_pred.copy()
+            X = segs[:, ::4]
+            y_true = seg_labels.copy()
+            # y_true = seg_indivs.copy()
+            y_pred = y_true.copy()
+            y_pred_another = y_pred.copy()
 
-        for test_indiv in np.unique(seg_indivs[np.isin(seg_labels, subcls)]):
-            print(test_indiv, end=' ')
-            mask_train = (seg_indivs != test_indiv) & mask_subcls & mask_non_outlier
-            mask_test = (seg_indivs == test_indiv) & mask_subcls & mask_non_outlier
-            y = 0*(y_true == subcls[0])
-            for i in range(1, len(subcls)):
-                y += i*(y_true == subcls[i])
+            for test_indiv in np.unique(seg_indivs[np.isin(seg_labels, subcls)]):
+                print(test_indiv, end=' ')
+                mask_train = (seg_indivs != test_indiv) & mask_subcls & mask_non_outlier
+                mask_test = (seg_indivs == test_indiv) & mask_subcls & mask_non_outlier
+                y = 0*(y_true == subcls[0])
+                for i in range(1, len(subcls)):
+                    y += i*(y_true == subcls[i])
 
-            for ts_only in (True, False):
-                model = get_model(len(subcls), ts_shape=X.shape[1:], xw_size=sine_0d.shape[-1], ts_only=ts_only)
-                model.fit(
-                    (X[mask_train], sine_0d[mask_train]), y[mask_train],
-                    epochs=50,
-                    batch_size=64,
-                    verbose=0
-                )
-                predicted = np.vectorize(subcls.__getitem__)(np.argmax(model.predict((X[mask_test], sine_0d[mask_test]), verbose=0), axis=-1))
-                if ts_only:
-                    y_pred[mask_test] = predicted
-                else:
-                    y_pred_another[mask_test] = predicted
-            acc = 1e2*accuracy_score(y_true[mask_test], y_pred[mask_test])
-            acc_another = 1e2*accuracy_score(y_true[mask_test], y_pred_another[mask_test])
-            print(acc, acc_another)
-        print( 1e2*accuracy_score(y_true, y_pred) )
-        print( 1e2*accuracy_score(y_true, y_pred_another) )
-        file_log.write(f'{random_state},{1e2*accuracy_score(y_true, y_pred)},{1e2*accuracy_score(y_true, y_pred_another)}\n')
-        file_log.flush(); os.fsync(file_log.fileno())
+                for ts_only in (True, False):
+                    model = get_model(len(subcls), ts_shape=X.shape[1:], xw_size=sine_0d.shape[-1], ts_only=ts_only)
+                    model.fit(
+                        (X[mask_train], sine_0d[mask_train]), y[mask_train],
+                        epochs=50,
+                        batch_size=64,
+                        verbose=0
+                    )
+                    predicted = np.vectorize(subcls.__getitem__)(np.argmax(model.predict((X[mask_test], sine_0d[mask_test]), verbose=0), axis=-1))
+                    if ts_only:
+                        y_pred[mask_test] = predicted
+                    else:
+                        y_pred_another[mask_test] = predicted
+                acc = 1e2*accuracy_score(y_true[mask_test], y_pred[mask_test])
+                acc_another = 1e2*accuracy_score(y_true[mask_test], y_pred_another[mask_test])
+                print(acc, acc_another)
+            print( 1e2*accuracy_score(y_true, y_pred) )
+            print( 1e2*accuracy_score(y_true, y_pred_another) )
+            file_log.write(f'{"_".join(subcls)},{random_state},{1e2*accuracy_score(y_true, y_pred)},{1e2*accuracy_score(y_true, y_pred_another)}\n')
+            file_log.flush(); os.fsync(file_log.fileno())
         
     file_log.close()
 
