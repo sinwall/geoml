@@ -158,12 +158,12 @@ def get_model(n_classes=6, ts_shape=(120, 3), ts_only=True, xw_size=(128, )):
         kernel_regularizer=keras.regularizers.L2(l2_coef)
     )
 
+    input_ts = keras.Input(shape=ts_shape)
+    input_f = keras.Input(shape=xw_size)
+    output_ts = ts_part(input_ts)
     if ts_only:
-        model = keras.Sequential([ts_part, final_layer])
+        outputs = output_ts
     else:
-        input_ts = keras.Input(shape=ts_shape)
-        input_f = keras.Input(shape=xw_size)
-
         f_part = keras.Sequential([
             keras.layers.Dense(
                 units=8,
@@ -172,12 +172,11 @@ def get_model(n_classes=6, ts_shape=(120, 3), ts_only=True, xw_size=(128, )):
             ),
             keras.layers.BatchNormalization(),
         ])
-
-        output_ts = ts_part(input_ts)
         output_f = f_part(input_f)
-        outputs = final_layer(tf.concat([output_ts, output_f], axis=-1))
+        outputs = tf.concat([output_ts, output_f], axis=-1)
+    outputs = final_layer(outputs)
 
-        model = keras.Model(inputs=[input_ts, input_f], outputs=outputs)
+    model = keras.Model(inputs=[input_ts, input_f], outputs=outputs)
 
     model.compile(
         optimizer=keras.optimizers.Adam(1e-3),
@@ -212,11 +211,13 @@ def main():
 
     x = Embedder(dim_raw=dim_raw, lag=lag, reduce=reduce, channel_last=True).transform(segs)
     output_path = f'./output/{today}'
+    if not os.path.isdir(output_path):
+        os.mkdir(output_path)
     if not os.path.isfile(f'{output_path}/w_WISDM.npy'):
         w = calculate_weighting_vectors(x, w_scale)
         np.save(f'{output_path}/w_WISDM.npy', w, allow_pickle=False)
     else:
-        w = np.load(f'.{output_path}/w_WISDM.npy', allow_pickle=False)
+        w = np.load(f'{output_path}/w_WISDM.npy', allow_pickle=False)
 
     file_log = open(f'{output_path}/log_WISDM.csv', 'w')
     file_log.write('random_state,ts_only_true,ts_only_false\n')
