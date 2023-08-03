@@ -264,7 +264,7 @@ def main():
                 )
                 y_true_fold = seg_acts_encoded_dnn[mask_test]
                 y_pred_fold = np.argmax(model.predict(
-                    segs_dnn[mask_test] if ts_only else [segs_dnn[mask_test], sine_0d[mask_test]],
+                    [segs_dnn[mask_test], sine_0d[mask_test]],
                     verbose=0
                 ), axis=-1)
 
