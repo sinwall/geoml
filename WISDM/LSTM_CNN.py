@@ -186,14 +186,14 @@ def get_model(n_classes=6, ts_shape=(120, 3), ts_only=True, xw_size=(128, )):
     return model
 
 def main():
-    today = '20230801'
+    today = '20230810'
     seg_dur = 6
     ol_rate = 0.5
     lag = 10
     reduce = 0
     dim_raw = 2
     w_scale = 1e0
-    f_scale = 1e-1
+    f_scale = 1e0
     n_filters = 128
     # df = pd.read_csv(
     #     f'../input/WISDM_ar_v1.1/WISDM_ar_v1.1_raw_modified.txt', 
