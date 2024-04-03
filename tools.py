@@ -1,6 +1,10 @@
+import os
+import wfdb
 import numpy as np
 from scipy.spatial import distance_matrix
+from scipy.signal import butter, resample, sosfilt
 from numba import jit, prange
+
 
 class Embedder():
     def __init__(self, dim=2, lag=1, reduce=1, dim_raw=None, channel_last=False):
@@ -27,6 +31,10 @@ class Embedder():
         if self.channel_last:
             result = result.reshape(result.shape[:-2] + (-1, ))
         return result
+
+    @property
+    def length_loss(self):
+        return (self.dim-1)*self.lag
 
 
 class Weighting():
@@ -80,7 +88,7 @@ def calculate_weighting_vectors(pts_lst, scale=1.):
         pts_lst = pts_lst.reshape((-1, ) + shape[-2:])
         result = _calculate_weighting_vectors(pts_lst/scale).reshape(shape[:-1] + (1, ))
     elif isinstance(pts_lst, list):
-        result = [_calculate_weighting_vectors(pts/scale) for pts in pts_lst]
+        result = [_calculate_weighting_vectors(pts[np.newaxis]/scale) for pts in pts_lst]
     else:
         raise ValueError
     return result
@@ -107,8 +115,263 @@ class SineFilter():
         return result
 
 
-def generate_loocv_masks(seg_indivs):
-    for indiv in np.unique(seg_indivs):
-        mask_train = seg_indivs != indiv
-        mask_test = ~mask_train
-        yield mask_train, mask_test
+class FourierFilter():
+    def __init__(self, dim, n_filters, scale=1., random_state=None):
+        self.dim = dim
+        self.n_filters = n_filters
+        self.scale = scale
+        self.random_state = random_state
+        rng = np.random.default_rng(random_state)
+        n_wave_nums = -(-n_filters // 2)
+        # n_wave_nums = n_filters
+        # self.wave_numbers = (2*rng.random((n_wave_nums, dim))-1)
+        # self.wave_numbers *= rng.random((n_wave_nums, 1)) / np.linalg.norm(self.wave_numbers, axis=1, keepdims=True)
+        self.wave_numbers = (2*np.pi/scale)*uniform_sampling_sphere(rng, dim, n_wave_nums)
+
+    def apply(self, pts, weights, batch_size=None):
+        if batch_size is None:
+            batch_size = pts.shape[0]
+        # if pts.ndim > weights.ndim:
+        #     weights = weights[..., np.newaxis]
+        weights = np.squeeze(weights)
+        weights = weights.astype(complex)
+        return _fourier_filter_apply(pts, weights, self.n_filters, self.wave_numbers)
+        n_wave_nums = self.wave_numbers.shape[0]
+        result = np.empty((pts.shape[0], self.n_filters))
+        for i_start in range(0, result.shape[0], batch_size):
+            i_end = i_start + batch_size
+            pts_batch = pts[i_start:i_end]
+            weights_batch = weights[i_start:i_end]
+            complex_fourier = np.sum(
+                np.exp(1j*(pts_batch @ self.wave_numbers.T))*weights_batch,
+                axis=-2
+            )
+            # result[i_start:i_end] = np.abs(complex_fourier)
+            result[i_start:i_end, 0::2] = np.real(complex_fourier)
+            result[i_start:i_end, 1::2] = np.imag(complex_fourier[:, :self.n_filters-n_wave_nums])
+        return result
+
+
+def uniform_sampling_sphere(rng, dim, n_pts):
+    result = np.empty((0, dim))
+    while result.shape[0] < n_pts:
+        append = -1+2*rng.random((n_pts, dim))
+        append = append[np.linalg.norm(append, axis=1) <= 1]
+        result = np.concatenate([result, append])
+    result = result[:n_pts]
+    return result
+
+
+@jit(nopython=True, parallel=True)
+def _fourier_filter_apply(pts, weights, n_filters, wave_numbers):
+    n_wave_nums = wave_numbers.shape[0]
+    result = np.empty((pts.shape[0], n_filters))
+    for i in prange(result.shape[0]):
+        complex_fourier = np.exp(1j*(pts[i] @ wave_numbers.T)).T @ weights[i]
+        result[i, :n_wave_nums] = np.real(complex_fourier)
+        result[i, n_wave_nums:] = np.imag(complex_fourier[:n_filters-n_wave_nums])
+    return result
+
+
+symb_to_AAMI = {
+    'N': 'N', 'L': 'N', 'R': 'N', 'e': 'N', 'j': 'N',
+    'A': 'S', 'a': 'S', 'J': 'S', 'S': 'S',
+    'V': 'V', 'E': 'V', 
+    'F': 'F',
+    '/': 'Q', 'f': 'Q', 'Q': 'Q'
+}
+input_path = f'E:/database/mit-bih-arrhythmia-database-1.0.0'
+
+
+def as_partial(func):
+    def _decorated(*args, **kwargs):
+        def _inner(x):
+            return func(x, *args, **kwargs)
+        return _inner
+    return _decorated
+
+
+@as_partial
+def load_data(data_bundle=None, input_path=input_path):
+    if data_bundle is None:
+        data_bundle = dict()
+    ecg_signals = []
+    ecg_ids = []
+    ann_symbols = []
+    ann_locs = []
+
+    for file_name in sorted(os.listdir(f'{input_path}')):
+        if not file_name.endswith('hea'):
+            continue
+        file_name = f'{input_path}/{file_name[:-4]}'
+        sig, info = wfdb.rdsamp(file_name)
+        atr = wfdb.rdann(file_name, 'atr')
+        ecg_signals.append( sig[:, 0] ); ecg_ids.append( int(file_name[-3:]) )
+        ann_locs.append( np.array(atr.sample) )
+        ann_symbols.append( np.array([symb_to_AAMI.get(el, el) for el in atr.symbol]) )
+    ecg_signals = np.stack(ecg_signals); ecg_ids = np.array(ecg_ids)
+
+    data_bundle['ecg_raw'] = ecg_signals
+    data_bundle['ecg_signals'] = ecg_signals
+    data_bundle['ecg_ids'] = ecg_ids
+    return data_bundle
+
+@as_partial
+def remove_baseline(data_bundle, sos=None):
+    ecg_signals = data_bundle['ecg_signals']
+    if sos is None:
+        sos = butter(4, [0.5, 50], btype='bandpass', output='sos', fs=360)
+    ecg_filtered = sosfilt(
+        sos,
+        ecg_signals,
+        axis=-1
+    )
+    data_bundle['ecg_signals'] = ecg_filtered
+    return data_bundle
+
+
+@as_partial
+def resample_ecg(data_bundle, fs_before=360, fs_after=250):
+    ecg_signals = data_bundle['ecg_signals']
+    ecg_resampled = resample(
+        ecg_signals, 
+        num=int(ecg_signals.shape[-1]*(fs_after/fs_before)),
+        axis=-1
+    )
+    data_bundle['ecg_signals'] = ecg_resampled
+    return data_bundle
+
+@as_partial
+def divide_segments(data_bundle, seg_dur=2, fs=250, ol_rate=0):
+    ecg_signals = data_bundle['ecg_signals']
+    ecg_ids = data_bundle['ecg_ids']
+    seg_len = int(seg_dur*fs)
+    raw_len = ecg_signals.shape[-1]
+    segs = []; seg_ids = []
+    for i in range(0, raw_len, int((1-ol_rate)*fs)):
+        seg = ecg_signals[:, i:i+seg_len]
+        if seg.shape[-1] < seg_len: break
+        segs.append( seg )
+        seg_ids.append( ecg_ids )
+    segs = np.swapaxes(segs, 1, 0).reshape(-1, seg_len)
+    seg_ids = np.swapaxes(seg_ids, 1, 0).reshape(-1)
+    data_bundle['segs'] = segs
+    data_bundle['seg_ids'] = seg_ids
+    return data_bundle
+
+@as_partial
+def make_curves(data_bundle, dim=3, lag=4, reduce=0):
+    segs = data_bundle['segs']
+    embedder = Embedder(dim=dim, lag=lag, reduce=reduce)
+    curves = embedder.transform(segs)
+    data_bundle['curves'] = curves
+    return data_bundle
+
+@as_partial
+def compress_curves(data_bundle, size):
+    curves = data_bundle['curves']
+    data_bundle['curves_uncompressed'] = curves
+    size_r = size
+    print('Compression countdown started.', end=' ')
+    while size_r > 0:
+        print(size_r, end=' ')
+        n_remove = size_r // 2 if size_r > 1 else 1
+        curves = _compress_onestep(curves, n_remove)
+        size_r -= n_remove
+    print()
+    data_bundle['curves'] = curves
+    return data_bundle
+
+@jit(nopython=True, parallel=True)
+def _compress_onestep(curves, size):
+    n_timesteps = curves.shape[-2]
+    n_remove = size
+    diff_norm = np.sum(np.square(curves[:, 0:n_timesteps-n_timesteps%2:2] - curves[:, 1::2]), axis=-1)
+    # diff_norm = np.linalg.norm(curves[:, 0:n_timesteps-n_timesteps%2:2] - curves[:, 1::2], axis=-1)
+    # keepidxs = np.empty((curves.shape[0], n_timesteps-n_remove), dtype=np.int32)
+    # keepidxs[:, n_timesteps//2 - n_remove:n_timesteps-n_timesteps%2 - n_remove] = np.arange(1, curves.shape[1], 2)
+    # if (n_timesteps % 2 != 0):
+    #     keepidxs[:, -1] = n_timesteps-1
+
+    result = np.empty((curves.shape[0], n_timesteps-n_remove, curves.shape[-1]))
+    for i in prange(curves.shape[0]):
+        keepidxs = np.empty((n_timesteps-n_remove, ), dtype=np.int32)
+        keepidxs[n_timesteps//2 - n_remove:n_timesteps-n_timesteps%2 - n_remove] = np.arange(1, curves.shape[1], 2)
+        if (n_timesteps % 2 != 0):
+            keepidxs[-1] = n_timesteps-1
+        keepidxs[:n_timesteps//2 - n_remove] = 2*np.argsort(diff_norm[i])[n_remove:]
+        keepidxs = np.sort(keepidxs)
+        result[i] = curves[i, keepidxs]
+    return result
+    # keepidxs[:, :n_timesteps//2 - n_remove] = 2*np.argpartition(diff_norm, n_remove, axis=1)[:, n_remove:]
+    # keepidxs = np.sort(keepidxs, axis=1)
+    # curves = np.stack([
+    #     np.take_along_axis(curves[..., k], keepidxs, axis=1)
+    #     for k in range(curves.shape[-1])
+    # ], axis=-1)
+    # return curves
+
+@as_partial
+def calculate_weights(data_bundle, scale=1.):
+    curves = data_bundle['curves']
+    weights = np.empty(curves.shape[:-1])
+    batch_size = 1000
+    print('Weight calculation started.')
+    for num in range(0, curves.shape[0], batch_size):
+        print(num+batch_size, end=' ')
+        if ((num+batch_size)%10000 == 0):
+            print()
+        w_part = calculate_weighting_vectors(curves[num:num+batch_size]/scale)[..., 0]
+        weights[num:num+batch_size] = w_part
+    print()
+    data_bundle['weights'] = weights
+    return data_bundle
+
+
+@as_partial
+def extract_fourier(data_bundle, scale=1e0, n_filters=256, random_state=42):
+    curves = data_bundle['curves']
+    weights = data_bundle['weights']
+    fourier_filter = FourierFilter(dim=3, scale=scale, n_filters=n_filters, random_state=random_state)
+    X = fourier_filter.apply(curves, weights, batch_size=256)
+    data_bundle['X'] = X
+    return data_bundle
+
+
+@as_partial
+def split_into_train_test(data_bundle, test_ratio=0.2, ol_rate=0):
+    seg_ids = data_bundle['seg_ids']
+    idwise_cnt_normalized = np.sum([
+        (seg_ids == s)*np.cumsum((seg_ids == s) / np.sum(seg_ids == s))
+        for s in np.unique(seg_ids)
+    ], axis=0)
+    mask_train = idwise_cnt_normalized < (1-test_ratio)
+    mask_test = idwise_cnt_normalized >= 1-test_ratio
+    for s in np.unique(seg_ids):
+        mask_id_s = seg_ids == s
+        overlap_idx_min = np.min(np.where(mask_test&mask_id_s)[0])
+        overlap_idxs = np.arange(overlap_idx_min, overlap_idx_min+1/(1-ol_rate)-1, dtype=np.int32)
+        mask_test[overlap_idxs] = False
+    data_bundle['mask_train'] = mask_train
+    data_bundle['mask_test'] = mask_test
+    X, y = data_bundle['X'], data_bundle['seg_ids']
+    data_bundle['y'] = y
+    data_bundle['X_train'], data_bundle['X_test'] = X[mask_train], X[mask_test]
+    data_bundle['y_train'], data_bundle['y_test'] = y[mask_train], y[mask_test]
+    return data_bundle
+
+
+# def _make_geometric(segs, dim=3, lag=4, reduce=0, scale=1.):
+#     embedder = Embedder(dim=dim, lag=lag, reduce=reduce)
+#     length_loss = embedder.length_loss
+
+#     curves = embedder.transform(segs)
+#     weights = np.empty(curves.shape[:-1])
+#     batch_size = 1000
+#     for num in range(0, curves.shape[0], batch_size):
+#         print(num+batch_size, end=' ')
+#         if ((num+batch_size)%10000 == 0):
+#             print()
+#         w_part = calculate_weighting_vectors(curves[num:num+batch_size]/scale)[..., 0]
+#         weights[num:num+batch_size] = w_part
+#     return curves, weights
