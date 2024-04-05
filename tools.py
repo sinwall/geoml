@@ -180,7 +180,7 @@ symb_to_AAMI = {
     'F': 'F',
     '/': 'Q', 'f': 'Q', 'Q': 'Q'
 }
-input_path = f'E:/database/mit-bih-arrhythmia-database-1.0.0'
+dataset_path = f'E:/database/'
 
 
 def as_partial(func):
@@ -192,9 +192,30 @@ def as_partial(func):
 
 
 @as_partial
-def load_data(data_bundle=None, input_path=input_path):
+def load_data(data_bundle=None, dataset_name='MIT-BIH', dataset_path=dataset_path):
     if data_bundle is None:
         data_bundle = dict()
+    if dataset_name == 'MIT-BIH':
+        ecg_signals, ecg_ids = _load_MIT_BIH(input_path=dataset_path)
+        fs = 360
+    elif dataset_name == 'ECG-ID':
+        ecg_signals, ecg_ids = _load_ECG_ID(input_path=dataset_path)
+        fs = 500
+    elif dataset_name == 'PTB':
+        ecg_signals, ecg_ids = _load_PTB(input_path=dataset_path)
+        fs = 1000
+    elif dataset_name == 'NSRDB':
+        ecg_signals, ecg_ids = _load_NSRDB(input_path=dataset_path)
+        fs = 128
+
+    data_bundle['ecg_raw'] = ecg_signals
+    data_bundle['ecg_signals'] = ecg_signals
+    data_bundle['ecg_ids'] = ecg_ids
+    data_bundle['fs'] = fs
+    return data_bundle
+
+def _load_MIT_BIH(input_path=dataset_path):
+    input_path += 'mit-bih-arrhythmia-database-1.0.0'
     ecg_signals = []
     ecg_ids = []
     ann_symbols = []
@@ -210,34 +231,112 @@ def load_data(data_bundle=None, input_path=input_path):
         ann_locs.append( np.array(atr.sample) )
         ann_symbols.append( np.array([symb_to_AAMI.get(el, el) for el in atr.symbol]) )
     ecg_signals = np.stack(ecg_signals); ecg_ids = np.array(ecg_ids)
+    return ecg_signals, ecg_ids
 
-    data_bundle['ecg_raw'] = ecg_signals
-    data_bundle['ecg_signals'] = ecg_signals
-    data_bundle['ecg_ids'] = ecg_ids
-    return data_bundle
+def _load_ECG_ID(input_path=dataset_path):
+    input_path += 'ecg-id-database-1.0.0'
+    ecg_signals = []
+    ecg_ids = []
+    for person_num in range(1, 90+1):
+        header_names = sorted(
+            filter(
+                lambda name: name.endswith('.hea'),
+                os.listdir(f'{input_path}/Person_{person_num:0>2}')
+            ),
+            key=lambda name: int(name.split('_')[1].split('.')[0])
+        )
+        for header_name in header_names:
+            sig, info = wfdb.rdsamp(f'{input_path}/Person_{person_num:0>2}/{header_name[:-4]}')
+            atr = wfdb.rdann(f'{input_path}/Person_{person_num:0>2}/{header_name[:-4]}', 'atr')
+            ecg_signals.append( sig[:, 1])
+            ecg_ids.append(person_num)
+    ecg_signals = np.stack(ecg_signals); ecg_ids = np.array(ecg_ids)
+    return ecg_signals, ecg_ids
+
+def _load_PTB(input_path=dataset_path):
+    input_path += 'ptb-diagnostic-ecg-database-1.0.0'
+    ecg_signals = []
+    ecg_ids = []
+    for patient_num in range(1, 294+1):
+        if not os.path.isdir(f'{input_path}/patient{patient_num:0>3}'): continue
+        header_names = sorted(
+            filter(
+                lambda name: name.endswith('.hea'),
+                os.listdir(f'{input_path}/patient{patient_num:0>3}')
+            ),
+        )
+        for header_name in header_names:
+            sig, info = wfdb.rdsamp(f'{input_path}/patient{patient_num:0>3}/{header_name[:-4]}')
+            # atr = wfdb.rdann(f'{input_path}/patient{patient_num:0>3}/{header_name[:-4]}', 'atr')
+            ecg_signals.append( sig[:, 1])
+            ecg_ids.append(patient_num)
+    ecg_signals = np.stack(ecg_signals); ecg_ids = np.array(ecg_ids)
+    return ecg_signals, ecg_ids
+
+def _load_NSRDB(input_path=dataset_path):
+    input_path += 'mit-bih-normal-sinus-rhythm-database-1.0.0'
+    ecg_signals = []
+    ecg_ids = []
+    header_names = sorted(
+        filter(
+            lambda name: name.endswith('.hea'),
+            os.listdir(f'{input_path}')
+        ),
+    )
+    for header_name in header_names:
+        sig, info = wfdb.rdsamp(f'{input_path}/{header_name[:-4]}')
+        atr = wfdb.rdann(f'{input_path}/{header_name[:-4]}', 'atr')
+        for idx_first_N, symb_first in zip(atr.sample, atr.symbol):
+            if symb_first == 'N': break
+        for idx_last_N, symb_last in zip(reversed(atr.sample,), reversed(atr.symbol)):
+            if symb_last == 'N': break
+        sig = sig[idx_first_N:idx_last_N]
+        ecg_signals.append( sig[:, 0])
+        ecg_ids.append(int(header_name[:-4]))
+    return ecg_signals, ecg_ids
+
 
 @as_partial
 def remove_baseline(data_bundle, sos=None):
     ecg_signals = data_bundle['ecg_signals']
+    fs = data_bundle['fs']
     if sos is None:
-        sos = butter(4, [0.5, 50], btype='bandpass', output='sos', fs=360)
-    ecg_filtered = sosfilt(
-        sos,
-        ecg_signals,
-        axis=-1
-    )
+        sos = butter(4, [0.5, 50], btype='bandpass', output='sos', fs=fs)
+    
+    if isinstance(ecg_signals, np.ndarray):
+        ecg_filtered = sosfilt(
+            sos,
+            ecg_signals,
+            axis=1
+        )
+    else:
+        ecg_filtered = [sosfilt(
+            sos,
+            ecg_signal,
+            axis=0
+        ) for ecg_signal in ecg_signals]
     data_bundle['ecg_signals'] = ecg_filtered
     return data_bundle
 
 
 @as_partial
-def resample_ecg(data_bundle, fs_before=360, fs_after=250):
+def resample_ecg(data_bundle, fs_after=250):
     ecg_signals = data_bundle['ecg_signals']
-    ecg_resampled = resample(
-        ecg_signals, 
-        num=int(ecg_signals.shape[-1]*(fs_after/fs_before)),
-        axis=-1
-    )
+    fs_before = data_bundle['fs']
+    if isinstance(ecg_signals, np.ndarray):
+        ecg_resampled = resample(
+            ecg_signals, 
+            num=int(ecg_signals.shape[-1]*(fs_after/fs_before)),
+            axis=1
+        )
+    else:
+        ecg_resampled = [
+            resample(
+                ecg_signal, 
+                num=int(ecg_signal.shape[0]*(fs_after/fs_before)),
+                axis=0
+            ) for ecg_signal in ecg_signals
+        ]
     data_bundle['ecg_signals'] = ecg_resampled
     return data_bundle
 
@@ -246,15 +345,25 @@ def divide_segments(data_bundle, seg_dur=2, fs=250, ol_rate=0):
     ecg_signals = data_bundle['ecg_signals']
     ecg_ids = data_bundle['ecg_ids']
     seg_len = int(seg_dur*fs)
-    raw_len = ecg_signals.shape[-1]
     segs = []; seg_ids = []
-    for i in range(0, raw_len, int((1-ol_rate)*fs)):
-        seg = ecg_signals[:, i:i+seg_len]
-        if seg.shape[-1] < seg_len: break
-        segs.append( seg )
-        seg_ids.append( ecg_ids )
-    segs = np.swapaxes(segs, 1, 0).reshape(-1, seg_len)
-    seg_ids = np.swapaxes(seg_ids, 1, 0).reshape(-1)
+    if isinstance(ecg_signals, np.ndarray):
+        raw_len = ecg_signals.shape[1]
+        for i in range(0, raw_len, int((1-ol_rate)*fs)):
+            seg = ecg_signals[:, i:i+seg_len]
+            if seg.shape[1] < seg_len: break
+            segs.append( seg )
+            seg_ids.append( ecg_ids )
+        segs = np.swapaxes(segs, 1, 0).reshape(-1, seg_len)
+        seg_ids = np.swapaxes(seg_ids, 1, 0).reshape(-1)
+    else:
+        for ecg_signal, ecg_id in zip(ecg_signals, ecg_ids):
+            raw_len = ecg_signal.shape[0]
+            for i in range(0, raw_len, int((1-ol_rate)*fs)):
+                seg = ecg_signal[i:i+seg_len]
+                if seg.shape[0] < seg_len: break
+                segs.append( seg )
+                seg_ids.append( ecg_id )
+        segs = np.array(segs); seg_ids = np.array(seg_ids)
     data_bundle['segs'] = segs
     data_bundle['seg_ids'] = seg_ids
     return data_bundle
@@ -272,12 +381,17 @@ def compress_curves(data_bundle, size):
     curves = data_bundle['curves']
     data_bundle['curves_uncompressed'] = curves
     size_r = size
+    batch_size = 1000000
     print('Compression countdown started.', end=' ')
     while size_r > 0:
+        curves_comp = []
         print(size_r, end=' ')
         n_remove = size_r // 2 if size_r > 1 else 1
-        curves = _compress_onestep(curves, n_remove)
         size_r -= n_remove
+        for i in range(0, curves.shape[0], batch_size):
+            curves_batch = curves[i:i+batch_size]
+            curves_comp.append( _compress_onestep(curves_batch, n_remove) )
+        curves = np.concatenate(curves_comp, axis=0)
     print()
     data_bundle['curves'] = curves
     return data_bundle
@@ -332,7 +446,7 @@ def calculate_weights(data_bundle, scale=1.):
 def extract_fourier(data_bundle, scale=1e0, n_filters=256, random_state=42):
     curves = data_bundle['curves']
     weights = data_bundle['weights']
-    fourier_filter = FourierFilter(dim=3, scale=scale, n_filters=n_filters, random_state=random_state)
+    fourier_filter = FourierFilter(dim=curves.shape[-1], scale=scale, n_filters=n_filters, random_state=random_state)
     X = fourier_filter.apply(curves, weights, batch_size=256)
     data_bundle['X'] = X
     return data_bundle
